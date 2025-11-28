@@ -1,0 +1,44 @@
+name: CD Pipeline
+
+on:
+  push:
+    branches:
+      - master
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+      
+      - name: Fetch best model from MLflow
+        env:
+          MLFLOW_TRACKING_URI: ${{ secrets.MLFLOW_TRACKING_URI }}
+        run: |
+          python scripts/fetch_model.py
+      
+      - name: Build Docker image
+        run: |
+          docker build -f docker/Dockerfile -t stock-prediction-api:latest .
+      
+      - name: Test Docker image
+        run: |
+          docker run -d --name test-container \
+            -p 8000:8000 \
+            -e MLFLOW_TRACKING_URI=${{ secrets.MLFLOW_TRACKING_URI }} \
+            stock-prediction-api:latest
+          
+          sleep 15
+          
+          # Health check
+          curl -f http://localhost:8000/health || exit 1
+          
+          # Test prediction endpoint
+          curl -X POST http://localhost:8000/predict \
+            -H "Content-Type: application/json" \
+            -d '{"symbol": "AAPL"}' || true
+          
+          docker stop test-container
+          docker rm test-container
+

@@ -1,0 +1,85 @@
+# Configuration file for RPS Stock Prediction System
+
+# API Configuration
+api:
+  stockdata:
+    base_url: "https://api.stockdata.org/v1"
+    # API key should be set in .env file
+    timeout: 30
+    retry_attempts: 3
+
+# Data Configuration
+data:
+  symbol: "AAPL"  # Default stock symbol
+  interval: "hour"  # Data interval: 'hour', 'minute', or 'day'
+  lookback_days: 30  # Days of historical data to fetch (max 180 for hour, 7 for minute)
+  use_adjusted: false  # Use adjusted intraday data (requires Standard plan or above)
+  raw_data_path: "data/raw"
+  processed_data_path: "data/processed"
+  minio:
+    endpoint: "localhost:9000"
+    access_key: "minioadmin"
+    secret_key: "minioadmin"
+    bucket: "stock-data"
+
+# Model Configuration
+model:
+  target: "volatility"  # Predict volatility
+  features:
+    - "close"
+    - "volume"
+    - "high"
+    - "low"
+    - "open"
+  test_size: 0.2
+  random_state: 42
+  hyperparameters:
+    n_estimators: 100
+    max_depth: 10
+    learning_rate: 0.1
+
+# MLflow Configuration
+mlflow:
+  tracking_uri: ""  # Set via environment variable or Dagshub
+  experiment_name: "stock_volatility_prediction"
+  registry_uri: ""  # Set via environment variable
+
+# DVC Configuration
+dvc:
+  remote: "dagshub"
+  data_dir: "data/processed"
+
+# Airflow Configuration
+airflow:
+  dag_id: "stock_prediction_pipeline"
+  schedule_interval: "0 */6 * * *"  # Every 6 hours
+  start_date: "2024-01-01"
+
+# Data Quality Checks
+quality:
+  max_null_percentage: 1.0  # Fail if >1% nulls
+  required_columns:
+    - "timestamp"
+    - "open"
+    - "high"
+    - "low"
+    - "close"
+    - "volume"
+  min_rows: 100
+
+# API Service Configuration
+api_service:
+  host: "0.0.0.0"
+  port: 8000
+  workers: 4
+
+# Monitoring Configuration
+monitoring:
+  prometheus:
+    port: 9090
+  grafana:
+    port: 3000
+  alerts:
+    latency_threshold_ms: 500
+    drift_threshold: 0.1
+

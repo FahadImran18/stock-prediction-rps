@@ -1,0 +1,52 @@
+{
+  "dashboard": {
+    "title": "Stock Prediction API Monitoring",
+    "panels": [
+      {
+        "title": "Request Rate",
+        "targets": [
+          {
+            "expr": "rate(api_requests_total[5m])",
+            "legendFormat": "{{method}} {{endpoint}}"
+          }
+        ],
+        "type": "graph"
+      },
+      {
+        "title": "API Latency",
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.95, api_request_duration_seconds_bucket)",
+            "legendFormat": "95th percentile"
+          },
+          {
+            "expr": "histogram_quantile(0.50, api_request_duration_seconds_bucket)",
+            "legendFormat": "50th percentile"
+          }
+        ],
+        "type": "graph"
+      },
+      {
+        "title": "Model Inference Latency",
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.95, model_inference_duration_seconds_bucket)",
+            "legendFormat": "95th percentile"
+          }
+        ],
+        "type": "graph"
+      },
+      {
+        "title": "Data Drift Ratio",
+        "targets": [
+          {
+            "expr": "data_drift_ratio",
+            "legendFormat": "Drift Ratio"
+          }
+        ],
+        "type": "graph"
+      }
+    ]
+  }
+}
+

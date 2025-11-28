@@ -1,0 +1,19 @@
+# DVC ignore file
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+*.log
+.DS_Store
+.vscode/
+.idea/
+*.swp
+*.swo
+mlruns/
+.airflow/
+airflow.db
+
