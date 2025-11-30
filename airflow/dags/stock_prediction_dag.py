@@ -9,6 +9,7 @@ from airflow.utils.dates import days_ago
 import os
 import sys
 import yaml
+import logging
 
 # Add src to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../'))
@@ -120,10 +121,10 @@ transform = PythonOperator(
 
 # Task 4: Generate data profile
 def profile_task(**context):
-    """Generate pandas profiling report"""
+    """Generate data profile report (simple version for Python 3.12 compatibility)"""
     import pandas as pd
-    from pandas_profiling import ProfileReport
     import mlflow
+    import json
     
     ti = context['ti']
     filepath = ti.xcom_pull(task_ids='transform_data')
@@ -131,13 +132,33 @@ def profile_task(**context):
     # Load data
     df = pd.read_parquet(filepath)
     
-    # Generate profile
-    profile = ProfileReport(df, title="Stock Data Profile", minimal=True)
+    # Generate simple profile (works with Python 3.12)
+    profile_data = {
+        "data_rows": len(df),
+        "data_columns": len(df.columns),
+        "column_names": list(df.columns),
+        "dtypes": {col: str(dtype) for col, dtype in df.dtypes.items()},
+        "missing_values": df.isnull().sum().to_dict(),
+        "numeric_summary": df.describe().to_dict() if len(df.select_dtypes(include=['number']).columns) > 0 else {},
+        "memory_usage_mb": df.memory_usage(deep=True).sum() / 1024**2
+    }
     
-    # Save profile
-    profile_path = f"data/profiles/profile_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html"
+    # Save profile as JSON
+    profile_path = f"data/profiles/profile_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
     os.makedirs(os.path.dirname(profile_path), exist_ok=True)
-    profile.to_file(profile_path)
+    with open(profile_path, 'w') as f:
+        json.dump(profile_data, f, indent=2, default=str)
+    
+    # Try to use pandas-profiling if available (for older Python versions)
+    try:
+        from pandas_profiling import ProfileReport
+        html_profile = ProfileReport(df, title="Stock Data Profile", minimal=True)
+        html_path = profile_path.replace('.json', '.html')
+        html_profile.to_file(html_path)
+        profile_path = html_path
+    except ImportError:
+        # pandas-profiling not available (Python 3.12+), use JSON profile
+        logging.info("pandas-profiling not available, using JSON profile")
     
     # Log to MLflow
     mlflow_tracking_uri = os.getenv('MLFLOW_TRACKING_URI')
@@ -149,6 +170,7 @@ def profile_task(**context):
             mlflow.log_artifact(profile_path, "data_profiles")
             mlflow.log_param("data_rows", len(df))
             mlflow.log_param("data_columns", len(df.columns))
+            mlflow.log_param("memory_usage_mb", profile_data["memory_usage_mb"])
     
     return profile_path
 
