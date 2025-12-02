@@ -3,13 +3,16 @@ Apache Airflow DAG for Stock Prediction Pipeline
 """
 from datetime import datetime, timedelta
 from airflow import DAG
-from airflow.operators.python import PythonOperator
-from airflow.operators.bash import BashOperator
-from airflow.utils.dates import days_ago
+from airflow.providers.standard.operators.python import PythonOperator
+from airflow.providers.standard.operators.bash import BashOperator
 import os
 import sys
 import yaml
 import logging
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 # Add src to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../'))
@@ -35,12 +38,13 @@ default_args = {
 }
 
 # DAG definition
+# Note: days_ago was removed in Airflow 2.4+, using datetime instead
 dag = DAG(
     config['airflow']['dag_id'],
     default_args=default_args,
     description='Stock Volatility Prediction Pipeline',
-    schedule_interval=config['airflow']['schedule_interval'],
-    start_date=days_ago(1),
+    schedule=config['airflow']['schedule_interval'],  # Changed from schedule_interval to schedule in Airflow 2.4+
+    start_date=datetime.now() - timedelta(days=1),  # Replaced days_ago(1)
     catchup=False,
     tags=['mlops', 'stock-prediction'],
 )
@@ -48,9 +52,38 @@ dag = DAG(
 # Task 1: Extract data
 def extract_task(**context):
     """Extract stock data from API"""
+    # Try multiple ways to get API key
+    # 1. From environment variable
     api_key = os.getenv('STOCKDATA_API_KEY')
+    
+    # 2. From Airflow Variables
     if not api_key:
-        raise ValueError("STOCKDATA_API_KEY not set")
+        from airflow.models import Variable
+        try:
+            api_key = Variable.get('STOCKDATA_API_KEY', default_var=None)
+        except Exception:
+            pass
+    
+    # 3. From DAG run configuration
+    if not api_key and context.get('dag_run') and context.get('dag_run').conf:
+        api_key = context.get('dag_run').conf.get('STOCKDATA_API_KEY')
+    
+    # 4. Try loading from .env file
+    if not api_key:
+        from pathlib import Path
+        env_path = Path(__file__).parent.parent.parent / '.env'
+        if env_path.exists():
+            load_dotenv(env_path, override=True)
+            api_key = os.getenv('STOCKDATA_API_KEY')
+    
+    if not api_key:
+        raise ValueError(
+            "STOCKDATA_API_KEY not set. "
+            "Options:\n"
+            "1. Set in .env file: STOCKDATA_API_KEY=your_key\n"
+            "2. Set as Airflow Variable: airflow variables set STOCKDATA_API_KEY your_key\n"
+            "3. Pass in DAG run config when triggering"
+        )
     
     filepath = extract_stock_data(
         api_key=api_key,
