@@ -1,0 +1,46 @@
+[flake8]
+# Exclude directories and files
+exclude =
+    .git,
+    __pycache__,
+    .venv,
+    venv,
+    env,
+    .eggs,
+    *.egg,
+    build,
+    dist,
+    .dvc,
+    data,
+    models,
+    mlruns,
+    airflow/logs,
+    airflow/__pycache__,
+    features.pkl,
+    *.pkl,
+    *.joblib,
+    *.parquet,
+    *.csv,
+    *.json,
+    *.h5,
+    *.pth,
+    *.pt
+
+# Maximum line length
+max-line-length = 127
+
+# Maximum complexity
+max-complexity = 10
+
+# Ignore specific error codes
+ignore = 
+    E203,  # whitespace before ':'
+    E501,  # line too long (handled by max-line-length)
+    W503,  # line break before binary operator
+
+# Select specific error codes for strict checking
+select = E9,F63,F7,F82
+
+# Per-file ignores
+per-file-ignores =
+    __init__.py:F401  # Allow unused imports in __init__.py

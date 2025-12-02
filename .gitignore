@@ -71,6 +71,7 @@ models/
 *.h5
 *.pth
 *.pt
+features.pkl
 
 # Prometheus
 prometheus_data/
