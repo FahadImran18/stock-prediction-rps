@@ -134,6 +134,9 @@ def compare_models():
             print("- Production model metrics not available")
         if not latest_metrics:
             print("- Latest model metrics not available")
+        # If we can't compare, fail the check (conservative approach)
+        print("\n❌ **REJECT**: Cannot verify model performance - blocking merge")
+        sys.exit(1)
 
 if __name__ == "__main__":
     compare_models()

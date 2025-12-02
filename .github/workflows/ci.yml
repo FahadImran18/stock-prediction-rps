@@ -105,11 +105,39 @@ jobs:
           # Install Python dependencies for comparison
           pip install mlflow dagshub
           
-          # Get current production model metrics
-          python scripts/compare_models.py > model_comparison.md || echo "# Model Comparison\n\n⚠️ Could not compare models - see logs" > model_comparison.md
+          # Run model comparison and capture exit code
+          # This script exits with code 1 if model is worse (per project requirements)
+          set +e  # Don't exit on error yet
+          python scripts/compare_models.py > model_comparison.md 2>&1
+          COMPARISON_EXIT_CODE=$?
+          set -e  # Exit on error again
           
-          # Post CML report as PR comment
-          cml comment create model_comparison.md --pr-id ${{ github.event.pull_request.number }} || echo "CML comment failed (non-blocking)"
+          # Post CML report to PR (always try to post, even if comparison failed)
+          if [ -n "${{ github.event.pull_request.number }}" ]; then
+            cml comment create model_comparison.md --pr-id ${{ github.event.pull_request.number }} || echo "⚠️ CML comment failed (non-blocking)"
+          else
+            echo "⚠️ PR number not available, skipping CML comment"
+            cat model_comparison.md  # Show report in logs instead
+          fi
+          
+          # Check if comparison failed (model is worse)
+          if [ $COMPARISON_EXIT_CODE -ne 0 ]; then
+            echo ""
+            echo "❌ =========================================="
+            echo "❌ Model comparison FAILED"
+            echo "❌ New model performs WORSE than production"
+            echo "❌ Blocking merge as per project requirements"
+            echo "❌ =========================================="
+            exit 1  # Fail the job to block merge
+          fi
+          
+          # Model is better - success
+          echo ""
+          echo "✅ =========================================="
+          echo "✅ Model comparison PASSED"
+          echo "✅ New model performs BETTER than production"
+          echo "✅ Merge approved"
+          echo "✅ =========================================="
 
   # Production Deployment (test → main/master)
   deploy:
