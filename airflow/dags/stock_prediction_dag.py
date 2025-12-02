@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 from airflow import DAG
 from airflow.providers.standard.operators.python import PythonOperator
 from airflow.providers.standard.operators.bash import BashOperator
+from airflow.models import Variable
 import os
 import sys
 import yaml
@@ -193,17 +194,77 @@ def profile_task(**context):
         # pandas-profiling not available (Python 3.12+), use JSON profile
         logging.info("pandas-profiling not available, using JSON profile")
     
-    # Log to MLflow
+    # Log to MLflow (optional - skip if not configured or auth fails)
     mlflow_tracking_uri = os.getenv('MLFLOW_TRACKING_URI')
+    if not mlflow_tracking_uri:
+        try:
+            mlflow_tracking_uri = Variable.get('MLFLOW_TRACKING_URI', default_var=None)
+        except Exception:
+            pass
+    
     if mlflow_tracking_uri:
-        mlflow.set_tracking_uri(mlflow_tracking_uri)
-        mlflow.set_experiment(config['mlflow']['experiment_name'])
-        
-        with mlflow.start_run(run_name=f"data_profile_{datetime.now().strftime('%Y%m%d_%H%M%S')}"):
-            mlflow.log_artifact(profile_path, "data_profiles")
-            mlflow.log_param("data_rows", len(df))
-            mlflow.log_param("data_columns", len(df.columns))
-            mlflow.log_param("memory_usage_mb", profile_data["memory_usage_mb"])
+        try:
+            # Try to get Dagshub credentials from Airflow Variables or environment
+            dagshub_username = os.getenv('DAGSHUB_USERNAME')
+            dagshub_token = os.getenv('DAGSHUB_TOKEN')
+            
+            if not dagshub_username:
+                try:
+                    dagshub_username = Variable.get('DAGSHUB_USERNAME', default_var=None)
+                except Exception:
+                    pass
+            
+            if not dagshub_token:
+                try:
+                    dagshub_token = Variable.get('DAGSHUB_TOKEN', default_var=None)
+                except Exception:
+                    pass
+            
+            # For Dagshub MLflow, embed credentials in URI if available
+            if dagshub_username and dagshub_token and 'dagshub.com' in mlflow_tracking_uri:
+                # Embed credentials in URI: https://username:token@dagshub.com/...
+                from urllib.parse import urlparse, urlunparse
+                parsed = urlparse(mlflow_tracking_uri)
+                auth_uri = urlunparse((
+                    parsed.scheme,
+                    f"{dagshub_username}:{dagshub_token}@{parsed.netloc}",
+                    parsed.path,
+                    parsed.params,
+                    parsed.query,
+                    parsed.fragment
+                ))
+                mlflow.set_tracking_uri(auth_uri)
+            else:
+                mlflow.set_tracking_uri(mlflow_tracking_uri)
+            
+            # Try to get or create experiment
+            try:
+                # Try to get existing experiment
+                experiment = mlflow.get_experiment_by_name(config['mlflow']['experiment_name'])
+                if experiment is None:
+                    # Create if doesn't exist
+                    experiment_id = mlflow.create_experiment(config['mlflow']['experiment_name'])
+                    logging.info(f"Created MLflow experiment: {experiment_id}")
+                mlflow.set_experiment(config['mlflow']['experiment_name'])
+            except Exception as exp_error:
+                logging.warning(f"Could not set/create MLflow experiment: {exp_error}")
+                logging.info("Skipping MLflow logging - check credentials and permissions")
+                return profile_path
+            
+            # Log to MLflow
+            with mlflow.start_run(run_name=f"data_profile_{datetime.now().strftime('%Y%m%d_%H%M%S')}"):
+                mlflow.log_artifact(profile_path, "data_profiles")
+                mlflow.log_param("data_rows", len(df))
+                mlflow.log_param("data_columns", len(df.columns))
+                mlflow.log_param("memory_usage_mb", profile_data["memory_usage_mb"])
+                logging.info("Successfully logged profile to MLflow")
+        except Exception as e:
+            logging.warning(f"MLflow logging failed: {e}")
+            logging.info("Continuing without MLflow logging - profile saved locally")
+            import traceback
+            logging.debug(traceback.format_exc())
+    else:
+        logging.info("MLFLOW_TRACKING_URI not set, skipping MLflow logging")
     
     return profile_path
 
@@ -215,20 +276,48 @@ profile = PythonOperator(
 
 # Task 5: Load to storage
 def load_task(**context):
-    """Load processed data to MinIO/S3"""
+    """Load processed data to MinIO/S3 (optional - skips if MinIO unavailable)"""
+    import socket
+    import logging
+    
     ti = context['ti']
     filepath = ti.xcom_pull(task_ids='transform_data')
     
-    object_name = load_to_storage(
-        filepath=filepath,
-        endpoint=config['data']['minio']['endpoint'],
-        access_key=config['data']['minio']['access_key'],
-        secret_key=config['data']['minio']['secret_key'],
-        bucket=config['data']['minio']['bucket'],
-        use_minio=True
-    )
+    # Check if MinIO is available
+    endpoint = config['data']['minio']['endpoint']
+    host, port = endpoint.split(':') if ':' in endpoint else (endpoint, '9000')
     
-    return object_name
+    try:
+        # Try to connect to MinIO
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(2)
+        result = sock.connect_ex((host, int(port)))
+        sock.close()
+        
+        if result != 0:
+            logging.warning(f"MinIO not available at {endpoint}, skipping storage upload")
+            logging.info("To enable storage, start MinIO: docker-compose up -d minio")
+            return None
+    except Exception as e:
+        logging.warning(f"Could not check MinIO availability: {e}, skipping storage upload")
+        return None
+    
+    # MinIO is available, try to upload
+    try:
+        object_name = load_to_storage(
+            filepath=filepath,
+            endpoint=endpoint,
+            access_key=config['data']['minio']['access_key'],
+            secret_key=config['data']['minio']['secret_key'],
+            bucket=config['data']['minio']['bucket'],
+            use_minio=True
+        )
+        logging.info(f"Successfully uploaded to MinIO: {object_name}")
+        return object_name
+    except Exception as e:
+        logging.warning(f"Failed to upload to MinIO: {e}")
+        logging.info("Continuing pipeline without storage upload")
+        return None
 
 load = PythonOperator(
     task_id='load_to_storage',
@@ -239,19 +328,54 @@ load = PythonOperator(
 # Task 6: DVC versioning
 def dvc_version_task(**context):
     """Version data with DVC"""
+    import subprocess
+    import logging
+    
     ti = context['ti']
     filepath = ti.xcom_pull(task_ids='transform_data')
     
-    # Use DVC to add and push data
-    import subprocess
+    if not filepath or not os.path.exists(filepath):
+        raise ValueError(f"Data file not found: {filepath}")
     
-    # Add file to DVC
-    subprocess.run(['dvc', 'add', filepath], check=True)
-    
-    # Commit DVC metadata
-    subprocess.run(['git', 'add', f'{filepath}.dvc'], check=True)
-    
-    return filepath
+    try:
+        # Add file to DVC (this creates .dvc file and .gitignore entry)
+        logging.info(f"Adding {filepath} to DVC...")
+        result = subprocess.run(
+            ['dvc', 'add', filepath],
+            check=True,
+            capture_output=True,
+            text=True,
+            cwd=os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+        )
+        logging.info(f"DVC add output: {result.stdout}")
+        
+        # The .dvc file should be created
+        dvc_file = f'{filepath}.dvc'
+        if os.path.exists(dvc_file):
+            logging.info(f"DVC file created: {dvc_file}")
+        else:
+            logging.warning(f"DVC file not found: {dvc_file}")
+        
+        # Note: Git commit should be done separately or via git hook
+        # We'll just add the .dvc file to git staging
+        try:
+            subprocess.run(
+                ['git', 'add', dvc_file],
+                check=False,  # Don't fail if git not initialized
+                capture_output=True,
+                text=True,
+                cwd=os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+            )
+        except Exception as e:
+            logging.warning(f"Could not add .dvc file to git: {e}")
+        
+        return filepath
+        
+    except subprocess.CalledProcessError as e:
+        logging.error(f"DVC command failed: {e}")
+        logging.error(f"STDERR: {e.stderr}")
+        logging.error(f"STDOUT: {e.stdout}")
+        raise
 
 dvc_version = PythonOperator(
     task_id='version_data_dvc',
@@ -262,24 +386,74 @@ dvc_version = PythonOperator(
 # Task 7: Train model
 def train_task(**context):
     """Train the model"""
+    import subprocess
+    
     ti = context['ti']
     filepath = ti.xcom_pull(task_ids='transform_data')
     
+    if not filepath:
+        raise ValueError("No data file path received from transform_data task")
+    
+    # Get MLflow and Dagshub credentials from environment or Airflow Variables
+    env = os.environ.copy()
+    
+    # MLflow tracking URI
+    mlflow_uri = (
+        os.getenv('MLFLOW_TRACKING_URI') or
+        Variable.get('MLFLOW_TRACKING_URI', default_var=None)
+    )
+    if mlflow_uri:
+        env['MLFLOW_TRACKING_URI'] = mlflow_uri
+    
+    # Dagshub credentials
+    dagshub_username = (
+        os.getenv('DAGSHUB_USERNAME') or
+        Variable.get('DAGSHUB_USERNAME', default_var=None)
+    )
+    if dagshub_username:
+        env['DAGSHUB_USERNAME'] = dagshub_username
+    
+    dagshub_token = (
+        os.getenv('DAGSHUB_TOKEN') or
+        Variable.get('DAGSHUB_TOKEN', default_var=None)
+    )
+    if dagshub_token:
+        env['DAGSHUB_TOKEN'] = dagshub_token
+    
     # Run training script
-    import subprocess
     train_script = os.path.join(os.path.dirname(__file__), '../../src/training/train.py')
+    
+    # Change to project root directory for relative paths to work
+    project_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+    
+    logging.info(f"Running training script: {train_script}")
+    logging.info(f"Data file: {filepath}")
+    logging.info(f"Working directory: {project_root}")
     
     result = subprocess.run(
         [sys.executable, train_script, '--data-path', filepath],
+        cwd=project_root,
+        env=env,
         capture_output=True,
         text=True,
-        check=True
+        check=False  # Don't raise immediately, log errors first
     )
     
-    print(result.stdout)
+    # Log output
+    if result.stdout:
+        logging.info(f"Training stdout:\n{result.stdout}")
     if result.stderr:
-        print(result.stderr)
+        logging.warning(f"Training stderr:\n{result.stderr}")
     
+    # Check if training succeeded
+    if result.returncode != 0:
+        error_msg = f"Training failed with exit code {result.returncode}"
+        if result.stderr:
+            error_msg += f"\nError: {result.stderr}"
+        logging.error(error_msg)
+        raise RuntimeError(error_msg)
+    
+    logging.info("Training completed successfully")
     return "Training completed"
 
 train = PythonOperator(

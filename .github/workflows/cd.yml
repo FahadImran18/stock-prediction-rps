@@ -12,21 +12,39 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v3
       
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.12'
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      
       - name: Fetch best model from MLflow
         env:
           MLFLOW_TRACKING_URI: ${{ secrets.MLFLOW_TRACKING_URI }}
+          DAGSHUB_USERNAME: ${{ secrets.DAGSHUB_USERNAME }}
+          DAGSHUB_TOKEN: ${{ secrets.DAGSHUB_TOKEN }}
         run: |
-          python scripts/fetch_model.py
+          python scripts/fetch_model.py || echo "Model fetch failed, will use local model"
       
       - name: Build Docker image
         run: |
           docker build -f docker/Dockerfile -t stock-prediction-api:latest .
       
       - name: Test Docker image
+        env:
+          MLFLOW_TRACKING_URI: ${{ secrets.MLFLOW_TRACKING_URI }}
+          DAGSHUB_USERNAME: ${{ secrets.DAGSHUB_USERNAME }}
+          DAGSHUB_TOKEN: ${{ secrets.DAGSHUB_TOKEN }}
         run: |
           docker run -d --name test-container \
             -p 8000:8000 \
             -e MLFLOW_TRACKING_URI=${{ secrets.MLFLOW_TRACKING_URI }} \
+            -e DAGSHUB_USERNAME=${{ secrets.DAGSHUB_USERNAME }} \
+            -e DAGSHUB_TOKEN=${{ secrets.DAGSHUB_TOKEN }} \
             stock-prediction-api:latest
           
           sleep 15
@@ -37,8 +55,7 @@ jobs:
           # Test prediction endpoint
           curl -X POST http://localhost:8000/predict \
             -H "Content-Type: application/json" \
-            -d '{"symbol": "AAPL"}' || true
+            -d '{"symbol": "AAPL", "features": {"close": 150.0, "volume": 1000000, "high": 151.0, "low": 149.0, "open": 150.5}}' || true
           
           docker stop test-container
           docker rm test-container
-

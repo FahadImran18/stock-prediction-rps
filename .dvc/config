@@ -1,5 +1,5 @@
+[core]
+    remote = dagshub
+
 ['remote "dagshub"']
     url = https://dagshub.com/FahadImran18/stock-prediction-rps.git
-    user = FahadImran18
-    token = 7608d22d1243f36004244e395b687c09eaa8ad81
-

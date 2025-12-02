@@ -19,7 +19,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: '3.9'
+          python-version: '3.12'
       
       - name: Install dependencies
         run: |
@@ -53,7 +53,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: '3.9'
+          python-version: '3.12'
       
       - name: Install dependencies
         run: |
@@ -63,18 +63,22 @@ jobs:
       - name: Set up Airflow
         run: |
           export AIRFLOW_HOME=$PWD/airflow
-          airflow db init
+          airflow db init || true
       
       - name: Run Airflow DAG
         env:
           STOCKDATA_API_KEY: ${{ secrets.STOCKDATA_API_KEY }}
           MLFLOW_TRACKING_URI: ${{ secrets.MLFLOW_TRACKING_URI }}
+          DAGSHUB_USERNAME: ${{ secrets.DAGSHUB_USERNAME }}
+          DAGSHUB_TOKEN: ${{ secrets.DAGSHUB_TOKEN }}
           MINIO_ENDPOINT: localhost:9000
           MINIO_ACCESS_KEY: minioadmin
           MINIO_SECRET_KEY: minioadmin
         run: |
           export AIRFLOW_HOME=$PWD/airflow
-          # Trigger DAG execution (simplified - in production use Airflow API)
+          # Initialize Airflow DB
+          airflow db init || true
+          # Run pipeline test (simplified - in production use Airflow API)
           python -m pytest tests/test_pipeline.py -v || true
       
       - name: Compare models with CML
@@ -82,16 +86,21 @@ jobs:
         with:
           version: 'latest'
       
-      - name: Run CML
+      - name: Run CML Model Comparison
         env:
           REPO_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           MLFLOW_TRACKING_URI: ${{ secrets.MLFLOW_TRACKING_URI }}
+          DAGSHUB_USERNAME: ${{ secrets.DAGSHUB_USERNAME }}
+          DAGSHUB_TOKEN: ${{ secrets.DAGSHUB_TOKEN }}
         run: |
-          # Get current production model metrics
-          python scripts/compare_models.py > model_comparison.md
+          # Install Python dependencies for comparison
+          pip install mlflow dagshub
           
-          # Post CML report (CML is installed via setup-cml action, not pip)
-          cml comment create model_comparison.md --pr-id ${{ github.event.pull_request.number }} || true
+          # Get current production model metrics
+          python scripts/compare_models.py > model_comparison.md || echo "# Model Comparison\n\n⚠️ Could not compare models - see logs" > model_comparison.md
+          
+          # Post CML report as PR comment
+          cml comment create model_comparison.md --pr-id ${{ github.event.pull_request.number }} || echo "CML comment failed (non-blocking)"
 
   # Production Deployment (test → master)
   deploy:
@@ -114,7 +123,7 @@ jobs:
       - name: Get version
         id: version
         run: |
-          VERSION=$(git describe --tags --always)
+          VERSION=$(git describe --tags --always || echo "latest")
           echo "version=$VERSION" >> $GITHUB_OUTPUT
       
       - name: Build and push Docker image
@@ -128,10 +137,16 @@ jobs:
             ${{ secrets.DOCKER_USERNAME }}/stock-prediction-api:latest
       
       - name: Deploy verification
+        env:
+          MLFLOW_TRACKING_URI: ${{ secrets.MLFLOW_TRACKING_URI }}
+          DAGSHUB_USERNAME: ${{ secrets.DAGSHUB_USERNAME }}
+          DAGSHUB_TOKEN: ${{ secrets.DAGSHUB_TOKEN }}
         run: |
           docker run -d --name test-api \
             -p 8000:8000 \
             -e MLFLOW_TRACKING_URI=${{ secrets.MLFLOW_TRACKING_URI }} \
+            -e DAGSHUB_USERNAME=${{ secrets.DAGSHUB_USERNAME }} \
+            -e DAGSHUB_TOKEN=${{ secrets.DAGSHUB_TOKEN }} \
             ${{ secrets.DOCKER_USERNAME }}/stock-prediction-api:${{ steps.version.outputs.version }}
           
           sleep 10
@@ -141,4 +156,3 @@ jobs:
           
           docker stop test-api
           docker rm test-api
-

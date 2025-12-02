@@ -152,25 +152,83 @@ def main(data_path: str):
     Main training function
     
     Args:
-        data_path: Path to processed data file
+        data_path: Path to processed data file or directory containing parquet files
     """
     # Load configuration
     config = load_config()
     
-    # Set up MLflow
+    # Set up MLflow with Dagshub authentication
     mlflow_tracking_uri = os.getenv('MLFLOW_TRACKING_URI')
     if mlflow_tracking_uri:
-        mlflow.set_tracking_uri(mlflow_tracking_uri)
-        logger.info(f"MLflow tracking URI: {mlflow_tracking_uri}")
+        # Get Dagshub credentials
+        dagshub_username = os.getenv('DAGSHUB_USERNAME')
+        dagshub_token = os.getenv('DAGSHUB_TOKEN')
+        
+        # For Dagshub, embed credentials in URI if available
+        if dagshub_username and dagshub_token and 'dagshub.com' in mlflow_tracking_uri:
+            from urllib.parse import urlparse, urlunparse
+            parsed = urlparse(mlflow_tracking_uri)
+            # Embed credentials in URI: https://username:token@dagshub.com/...
+            auth_uri = urlunparse((
+                parsed.scheme,
+                f"{dagshub_username}:{dagshub_token}@{parsed.netloc}",
+                parsed.path,
+                parsed.params,
+                parsed.query,
+                parsed.fragment
+            ))
+            mlflow.set_tracking_uri(auth_uri)
+            logger.info(f"MLflow tracking URI: {parsed.scheme}://{parsed.netloc}{parsed.path} (with credentials)")
+        else:
+            mlflow.set_tracking_uri(mlflow_tracking_uri)
+            logger.info(f"MLflow tracking URI: {mlflow_tracking_uri}")
+            if 'dagshub.com' in mlflow_tracking_uri:
+                logger.warning("DAGSHUB_USERNAME and DAGSHUB_TOKEN not set. Set them for authentication.")
     else:
         logger.warning("MLFLOW_TRACKING_URI not set, using local tracking")
+        logger.warning("Set MLFLOW_TRACKING_URI environment variable to use Dagshub MLflow")
     
     experiment_name = config['mlflow']['experiment_name']
-    mlflow.set_experiment(experiment_name)
+    
+    # Try to set experiment (create if doesn't exist)
+    try:
+        experiment = mlflow.get_experiment_by_name(experiment_name)
+        if experiment is None:
+            experiment_id = mlflow.create_experiment(experiment_name)
+            logger.info(f"Created MLflow experiment: {experiment_id}")
+        mlflow.set_experiment(experiment_name)
+    except Exception as e:
+        logger.error(f"Could not set/create MLflow experiment: {e}")
+        logger.error("Check your Dagshub credentials (DAGSHUB_USERNAME and DAGSHUB_TOKEN)")
+        raise
+    
+    # Handle directory input - find latest parquet file
+    data_file = data_path
+    if os.path.isdir(data_path):
+        logger.info(f"Directory provided, finding latest parquet file in {data_path}")
+        parquet_files = [
+            f for f in os.listdir(data_path) 
+            if f.endswith('.parquet') and not f.endswith('.dvc')
+        ]
+        if not parquet_files:
+            raise ValueError(f"No parquet files found in {data_path}")
+        # Sort by modification time, get latest
+        parquet_files.sort(key=lambda f: os.path.getmtime(os.path.join(data_path, f)), reverse=True)
+        data_file = os.path.join(data_path, parquet_files[0])
+        logger.info(f"Using latest file: {data_file}")
+    
+    # Validate file exists and is not a .dvc file
+    if not os.path.exists(data_file):
+        raise FileNotFoundError(f"Data file not found: {data_file}")
+    if data_file.endswith('.dvc'):
+        raise ValueError(
+            f"Error: {data_file} is a DVC metadata file, not a data file. "
+            f"Use the .parquet file instead (without .dvc extension)."
+        )
     
     # Load data
-    logger.info(f"Loading data from {data_path}")
-    df = pd.read_parquet(data_path)
+    logger.info(f"Loading data from {data_file}")
+    df = pd.read_parquet(data_file)
     logger.info(f"Loaded {len(df)} rows")
     
     # Prepare data
@@ -179,7 +237,7 @@ def main(data_path: str):
     # Start MLflow run
     with mlflow.start_run(run_name=f"training_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}"):
         # Log parameters
-        mlflow.log_param("data_path", data_path)
+        mlflow.log_param("data_path", data_file)
         mlflow.log_param("n_samples", len(df))
         mlflow.log_param("n_features", len(feature_cols))
         mlflow.log_param("test_size", config['model']['test_size'])
@@ -199,12 +257,28 @@ def main(data_path: str):
         for key, value in metrics.items():
             mlflow.log_metric(key, value)
         
-        # Log model
-        mlflow.sklearn.log_model(
-            model,
-            "model",
-            registered_model_name="StockVolatilityPredictor"
-        )
+        # Log model to MLflow
+        # Note: Dagshub MLflow may not support Model Registry, so we log without registration
+        try:
+            mlflow.sklearn.log_model(
+                model,
+                "model"
+            )
+            logger.info("Model logged to MLflow successfully")
+            
+            # Try to register model (optional - Dagshub may not support this endpoint)
+            try:
+                from mlflow.tracking import MlflowClient
+                client = MlflowClient()
+                run_id = mlflow.active_run().info.run_id
+                client.create_registered_model("StockVolatilityPredictor")
+                logger.info("Model registry created")
+            except Exception as reg_error:
+                logger.debug(f"Model registry not available: {reg_error}")
+                logger.info("Model is logged to MLflow but not registered (Dagshub limitation)")
+        except Exception as e:
+            logger.error(f"Could not log model to MLflow: {e}")
+            logger.info("Saving model locally instead")
         
         # Save feature columns for inference
         feature_path = "features.pkl"
@@ -227,7 +301,7 @@ if __name__ == "__main__":
         '--data-path',
         type=str,
         required=True,
-        help='Path to processed data file'
+        help='Path to processed data file (.parquet) or directory containing parquet files'
     )
     
     args = parser.parse_args()

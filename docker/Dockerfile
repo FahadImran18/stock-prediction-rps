@@ -19,10 +19,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application code
 COPY src/ ./src/
 COPY config/ ./config/
-COPY models/ ./models/
 
-# Create necessary directories
-RUN mkdir -p data/raw data/processed data/profiles
+# Create necessary directories (models will be loaded from MLflow at runtime or mounted as volume)
+RUN mkdir -p models data/raw data/processed data/profiles
 
 # Expose port
 EXPOSE 8000

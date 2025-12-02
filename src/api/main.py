@@ -94,11 +94,31 @@ def load_model():
             else:
                 raise ValueError("MLFLOW_TRACKING_URI not set and local model not found")
         
-        mlflow.set_tracking_uri(mlflow_tracking_uri)
-        logger.info(f"Connecting to MLflow: {mlflow_tracking_uri}")
+        # Embed credentials if Dagshub
+        dagshub_username = os.getenv('DAGSHUB_USERNAME')
+        dagshub_token = os.getenv('DAGSHUB_TOKEN')
         
-        # Get the latest model from registry
+        if dagshub_username and dagshub_token and 'dagshub.com' in mlflow_tracking_uri:
+            from urllib.parse import urlparse, urlunparse
+            parsed = urlparse(mlflow_tracking_uri)
+            auth_uri = urlunparse((
+                parsed.scheme,
+                f"{dagshub_username}:{dagshub_token}@{parsed.netloc}",
+                parsed.path,
+                parsed.params,
+                parsed.query,
+                parsed.fragment
+            ))
+            mlflow.set_tracking_uri(auth_uri)
+            logger.info(f"Connecting to MLflow: {parsed.scheme}://{parsed.netloc}{parsed.path} (with credentials)")
+        else:
+            mlflow.set_tracking_uri(mlflow_tracking_uri)
+            logger.info(f"Connecting to MLflow: {mlflow_tracking_uri}")
+        
+        # Try to get model from registry first (may not work with Dagshub)
         client = mlflow.tracking.MlflowClient()
+        model_uri = None
+        run_id = None
         
         try:
             latest_version = client.get_latest_versions(
@@ -108,42 +128,79 @@ def load_model():
             
             if latest_version:
                 model_uri = f"models:/StockVolatilityPredictor/Production"
+                run_id = latest_version[0].run_id
+                logger.info("Found model in registry (Production stage)")
             else:
                 # Fallback to latest version
-                latest_version = client.get_latest_versions(
-                    "StockVolatilityPredictor"
-                )
+                latest_version = client.get_latest_versions("StockVolatilityPredictor")
                 if latest_version:
                     model_uri = f"models:/StockVolatilityPredictor/{latest_version[0].version}"
+                    run_id = latest_version[0].run_id
+                    logger.info(f"Found model in registry (version {latest_version[0].version})")
+        except Exception as reg_error:
+            logger.warning(f"Model Registry not available: {reg_error}")
+            logger.info("Falling back to loading latest run by experiment")
+            
+            # Fallback: Get latest run from experiment (works with Dagshub)
+            try:
+                experiment_name = "stock_volatility_prediction"
+                experiment = mlflow.get_experiment_by_name(experiment_name)
+                if experiment:
+                    runs = client.search_runs(
+                        experiment_ids=[experiment.experiment_id],
+                        order_by=["start_time DESC"],
+                        max_results=1
+                    )
+                    if runs:
+                        latest_run = runs[0]
+                        run_id = latest_run.info.run_id
+                        model_uri = f"runs:/{run_id}/model"
+                        logger.info(f"Loading model from latest run: {run_id}")
+                    else:
+                        raise ValueError(f"No runs found in experiment: {experiment_name}")
                 else:
-                    raise ValueError("No model found in registry")
-        except Exception as e:
-            logger.warning(f"Could not get model from registry: {e}")
-            # Try to load from local file
-            model_path = Path("models/model.joblib")
-            if model_path.exists():
-                model = joblib.load(model_path)
-                features_path = Path("models/features.pkl")
-                if features_path.exists():
-                    feature_columns = joblib.load(features_path)
-                drift_detector = DataDriftDetector()
-                logger.info("Model loaded from local file")
-                return
-            raise
+                    raise ValueError(f"Experiment not found: {experiment_name}")
+            except Exception as run_error:
+                logger.warning(f"Could not load from experiment: {run_error}")
+                # Final fallback: local file
+                model_path = Path("models/model.joblib")
+                if model_path.exists():
+                    logger.info("Loading model from local file (fallback)")
+                    model = joblib.load(model_path)
+                    features_path = Path("models/features.pkl")
+                    if features_path.exists():
+                        feature_columns = joblib.load(features_path)
+                    else:
+                        feature_columns = []
+                    drift_detector = DataDriftDetector()
+                    logger.info("Model loaded successfully from local file")
+                    return
+                raise ValueError("No model found in registry, experiment, or local file")
         
+        # Load model from MLflow
         logger.info(f"Loading model from {model_uri}")
         model = mlflow.sklearn.load_model(model_uri)
         
         # Try to load feature columns from artifact
-        try:
-            run_id = latest_version[0].run_id
-            artifacts_path = mlflow.artifacts.download_artifacts(
-                run_id=run_id,
-                artifact_path="artifacts/features.pkl"
-            )
-            feature_columns = joblib.load(artifacts_path)
-        except Exception as e:
-            logger.warning(f"Could not load feature columns: {e}")
+        if run_id:
+            try:
+                artifacts_path = mlflow.artifacts.download_artifacts(
+                    run_id=run_id,
+                    artifact_path="artifacts/features.pkl"
+                )
+                feature_columns = joblib.load(artifacts_path)
+                logger.info("Feature columns loaded from MLflow artifacts")
+            except Exception as e:
+                logger.warning(f"Could not load feature columns from artifacts: {e}")
+                # Try local file as fallback
+                features_path = Path("models/features.pkl")
+                if features_path.exists():
+                    feature_columns = joblib.load(features_path)
+                    logger.info("Feature columns loaded from local file")
+                else:
+                    feature_columns = []
+                    logger.warning("Feature columns not found, using empty list")
+        else:
             feature_columns = []
         
         drift_detector = DataDriftDetector()

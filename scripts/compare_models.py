@@ -15,11 +15,31 @@ def compare_models():
         print("MLFLOW_TRACKING_URI not set")
         sys.exit(1)
     
-    mlflow.set_tracking_uri(mlflow_tracking_uri)
+    # Handle Dagshub authentication
+    dagshub_username = os.getenv('DAGSHUB_USERNAME')
+    dagshub_token = os.getenv('DAGSHUB_TOKEN')
+    
+    if dagshub_username and dagshub_token and 'dagshub.com' in mlflow_tracking_uri:
+        from urllib.parse import urlparse, urlunparse
+        parsed = urlparse(mlflow_tracking_uri)
+        auth_uri = urlunparse((
+            parsed.scheme,
+            f"{dagshub_username}:{dagshub_token}@{parsed.netloc}",
+            parsed.path,
+            parsed.params,
+            parsed.query,
+            parsed.fragment
+        ))
+        mlflow.set_tracking_uri(auth_uri)
+    else:
+        mlflow.set_tracking_uri(mlflow_tracking_uri)
+    
     client = MlflowClient()
     
-    # Get production model
+    # Get production model (try registry first, fallback to latest experiment run)
+    prod_metrics = None
     try:
+        # Try Model Registry (may not work with Dagshub)
         prod_models = client.get_latest_versions(
             "StockVolatilityPredictor",
             stages=["Production"]
@@ -31,27 +51,46 @@ def compare_models():
                 'mae': prod_run.data.metrics.get('mae', 0),
                 'r2': prod_run.data.metrics.get('r2', 0)
             }
-        else:
-            prod_metrics = None
-    except Exception as e:
-        print(f"Could not fetch production model: {e}")
-        prod_metrics = None
+    except Exception:
+        # Fallback: Get latest run from experiment (works with Dagshub)
+        try:
+            experiment = mlflow.get_experiment_by_name("stock_volatility_prediction")
+            if experiment:
+                runs = client.search_runs(
+                    experiment_ids=[experiment.experiment_id],
+                    order_by=["start_time DESC"],
+                    max_results=2  # Get last 2 runs
+                )
+                if len(runs) >= 2:
+                    # Use second-to-last as "production" baseline
+                    prod_run = runs[1]
+                    prod_metrics = {
+                        'rmse': prod_run.data.metrics.get('rmse', 0),
+                        'mae': prod_run.data.metrics.get('mae', 0),
+                        'r2': prod_run.data.metrics.get('r2', 0)
+                    }
+        except Exception as e:
+            print(f"Could not fetch production model: {e}")
     
-    # Get latest model (from current run)
+    # Get latest model (most recent run)
+    latest_metrics = None
     try:
-        latest_models = client.get_latest_versions("StockVolatilityPredictor")
-        if latest_models:
-            latest_run = client.get_run(latest_models[0].run_id)
-            latest_metrics = {
-                'rmse': latest_run.data.metrics.get('rmse', 0),
-                'mae': latest_run.data.metrics.get('mae', 0),
-                'r2': latest_run.data.metrics.get('r2', 0)
-            }
-        else:
-            latest_metrics = None
+        experiment = mlflow.get_experiment_by_name("stock_volatility_prediction")
+        if experiment:
+            runs = client.search_runs(
+                experiment_ids=[experiment.experiment_id],
+                order_by=["start_time DESC"],
+                max_results=1
+            )
+            if runs:
+                latest_run = runs[0]
+                latest_metrics = {
+                    'rmse': latest_run.data.metrics.get('rmse', 0),
+                    'mae': latest_run.data.metrics.get('mae', 0),
+                    'r2': latest_run.data.metrics.get('r2', 0)
+                }
     except Exception as e:
         print(f"Could not fetch latest model: {e}")
-        latest_metrics = None
     
     # Generate comparison report
     print("# Model Comparison Report\n")

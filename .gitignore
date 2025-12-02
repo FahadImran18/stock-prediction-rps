@@ -23,12 +23,16 @@ wheels/
 .installed.cfg
 *.egg
 
-# DVC
-data/
-*.csv
-*.parquet
-*.pkl
-*.joblib
+# DVC (fixed)
+# Ignore only the big data files, not the folders
+data/**/*.csv
+data/**/*.parquet
+data/**/*.pkl
+data/**/*.joblib
+
+# Allow DVC metafiles
+!data/**/*.dvc
+!data/.gitkeep
 
 # MLflow
 mlruns/
@@ -73,9 +77,3 @@ prometheus_data/
 
 # Grafana
 grafana_data/
-
-# MD Files
-API_Implementation.md
-PROJECT_SUMMARY.md
-SETUP.md
-NOTES.md
