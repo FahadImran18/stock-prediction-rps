@@ -112,12 +112,25 @@ jobs:
           COMPARISON_EXIT_CODE=$?
           set -e  # Exit on error again
           
+          # Display the comparison report in logs
+          echo "=========================================="
+          echo "Model Comparison Report"
+          echo "=========================================="
+          cat model_comparison.md
+          echo "=========================================="
+          
           # Post CML report to PR (always try to post, even if comparison failed)
-          if [ -n "${{ github.event.pull_request.number }}" ]; then
-            cml comment create model_comparison.md --pr-id ${{ github.event.pull_request.number }} || echo "⚠️ CML comment failed (non-blocking)"
+          PR_NUMBER="${{ github.event.pull_request.number }}"
+          if [ -n "$PR_NUMBER" ] && [ "$PR_NUMBER" != "null" ]; then
+            echo "Posting CML report to PR #$PR_NUMBER..."
+            cml comment create model_comparison.md --pr-id "$PR_NUMBER" --token "$REPO_TOKEN" || {
+              echo "⚠️ CML comment failed - this is non-blocking"
+              echo "Report is available in the workflow logs above"
+            }
           else
-            echo "⚠️ PR number not available, skipping CML comment"
-            cat model_comparison.md  # Show report in logs instead
+            echo "⚠️ PR number not available (PR_NUMBER=$PR_NUMBER)"
+            echo "This might be a direct push or workflow_dispatch trigger"
+            echo "Report is available in the workflow logs above"
           fi
           
           # Check if comparison failed (model is worse)
@@ -128,6 +141,9 @@ jobs:
             echo "❌ New model performs WORSE than production"
             echo "❌ Blocking merge as per project requirements"
             echo "❌ =========================================="
+            echo ""
+            echo "The merge will be BLOCKED until the model performance improves."
+            echo "See the comparison report above for details."
             exit 1  # Fail the job to block merge
           fi
           
