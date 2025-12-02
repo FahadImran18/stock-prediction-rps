@@ -5,6 +5,7 @@ on:
     branches:
       - dev
       - test
+      - main
       - master
 
 jobs:
@@ -110,9 +111,9 @@ jobs:
           # Post CML report as PR comment
           cml comment create model_comparison.md --pr-id ${{ github.event.pull_request.number }} || echo "CML comment failed (non-blocking)"
 
-  # Production Deployment (test → master)
+  # Production Deployment (test → main/master)
   deploy:
-    if: github.base_ref == 'master'
+    if: github.base_ref == 'main' || github.base_ref == 'master'
     runs-on: ubuntu-latest
     needs: [code-quality, model-retraining]
     steps:
