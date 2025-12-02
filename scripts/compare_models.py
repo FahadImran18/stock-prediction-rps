@@ -87,82 +87,82 @@ def compare_models():
         print(f"❌ Failed to initialize MLflow client: {e}")
         sys.exit(1)
     
-    # Get production model (try registry first, fallback to latest experiment run)
+    # Get production model from experiment runs (Dagshub doesn't support Model Registry well)
+    # We'll filter for training runs only (not data profile runs)
     prod_metrics = None
-    try:
-        # Try Model Registry (may not work with Dagshub)
-        prod_models = client.get_latest_versions(
-            "StockVolatilityPredictor",
-            stages=["Production"]
-        )
-        if prod_models:
-            prod_run = client.get_run(prod_models[0].run_id)
-            prod_metrics = {
-                'rmse': prod_run.data.metrics.get('rmse'),
-                'mae': prod_run.data.metrics.get('mae'),
-                'r2': prod_run.data.metrics.get('r2')
-            }
-            # Validate metrics exist
-            if not all([prod_metrics['rmse'] is not None, prod_metrics['mae'] is not None, prod_metrics['r2'] is not None]):
-                prod_metrics = None
-    except Exception:
-        pass  # Fall through to experiment-based lookup
     
-    # Fallback: Get latest run from experiment (works with Dagshub)
-    if not prod_metrics:
-        try:
-            print("🔍 Fetching experiment: stock_volatility_prediction")
-            experiment = mlflow.get_experiment_by_name("stock_volatility_prediction")
-            if not experiment:
-                print("⚠️ Experiment 'stock_volatility_prediction' not found")
-            else:
-                print(f"✅ Found experiment: {experiment.experiment_id}")
-                print("🔍 Searching for runs...")
-                runs = client.search_runs(
-                    experiment_ids=[experiment.experiment_id],
-                    order_by=["start_time DESC"],
-                    max_results=2  # Get last 2 runs
-                )
-                print(f"📊 Found {len(runs)} run(s) in experiment")
-                
-                if len(runs) >= 2:
-                    # Use second-to-last as "production" baseline
-                    prod_run = runs[1]
-                    print(f"📌 Using run {prod_run.info.run_id} as production baseline")
-                    print(f"   Run name: {prod_run.info.run_name}")
-                    print(f"   Start time: {prod_run.info.start_time}")
-                    prod_metrics = {
-                        'rmse': prod_run.data.metrics.get('rmse'),
-                        'mae': prod_run.data.metrics.get('mae'),
-                        'r2': prod_run.data.metrics.get('r2')
-                    }
-                    # Validate metrics exist
-                    if not all([prod_metrics['rmse'] is not None, prod_metrics['mae'] is not None, prod_metrics['r2'] is not None]):
-                        print("⚠️ Production run exists but metrics are missing")
-                        prod_metrics = None
-                    else:
-                        print(f"✅ Production metrics: RMSE={prod_metrics['rmse']:.6f}, MAE={prod_metrics['mae']:.6f}, R²={prod_metrics['r2']:.6f}")
-                elif len(runs) == 1:
-                    print("ℹ️ Only 1 run found - this will be the baseline for future comparisons")
-        except Exception as e:
-            print(f"❌ Could not fetch production model: {e}")
-            import traceback
-            print(traceback.format_exc())
-    
-    # Get latest model (most recent run)
-    latest_metrics = None
+    # Get training runs from experiment (filter out data profile runs)
     try:
-        print("🔍 Fetching latest model run...")
+        print("🔍 Fetching experiment: stock_volatility_prediction")
         experiment = mlflow.get_experiment_by_name("stock_volatility_prediction")
-        if experiment:
-            runs = client.search_runs(
+        if not experiment:
+            print("⚠️ Experiment 'stock_volatility_prediction' not found")
+        else:
+            print(f"✅ Found experiment: {experiment.experiment_id}")
+            print("🔍 Searching for training runs (filtering out data profile runs)...")
+            
+            # Get all runs and filter for training runs only
+            all_runs = client.search_runs(
                 experiment_ids=[experiment.experiment_id],
                 order_by=["start_time DESC"],
-                max_results=1
+                max_results=10  # Get more runs to find training runs
             )
-            if runs:
-                latest_run = runs[0]
-                print(f"📌 Latest run: {latest_run.info.run_id}")
+            print(f"📊 Found {len(all_runs)} total run(s) in experiment")
+            
+            # Filter for training runs (run_name starts with "training_")
+            training_runs = [run for run in all_runs if run.info.run_name and run.info.run_name.startswith("training_")]
+            print(f"📊 Found {len(training_runs)} training run(s)")
+            
+            if len(training_runs) >= 2:
+                # Use second-to-last training run as "production" baseline
+                prod_run = training_runs[1]
+                print(f"📌 Using training run {prod_run.info.run_id} as production baseline")
+                print(f"   Run name: {prod_run.info.run_name}")
+                print(f"   Start time: {prod_run.info.start_time}")
+                prod_metrics = {
+                    'rmse': prod_run.data.metrics.get('rmse'),
+                    'mae': prod_run.data.metrics.get('mae'),
+                    'r2': prod_run.data.metrics.get('r2')
+                }
+                # Validate metrics exist and are reasonable
+                if not all([prod_metrics['rmse'] is not None, prod_metrics['mae'] is not None, prod_metrics['r2'] is not None]):
+                    print("⚠️ Production run exists but metrics are missing")
+                    prod_metrics = None
+                elif prod_metrics['rmse'] == 0 and prod_metrics['mae'] == 0 and prod_metrics['r2'] == 1.0:
+                    print("⚠️ Production metrics look suspicious (perfect scores) - may indicate data/evaluation issue")
+                    # Still use it, but warn
+                else:
+                    print(f"✅ Production metrics: RMSE={prod_metrics['rmse']:.6f}, MAE={prod_metrics['mae']:.6f}, R²={prod_metrics['r2']:.6f}")
+            elif len(training_runs) == 1:
+                print("ℹ️ Only 1 training run found - this will be the baseline for future comparisons")
+            else:
+                print("⚠️ No training runs found in experiment")
+                print("   Found runs:")
+                for run in all_runs[:5]:  # Show first 5 runs
+                    print(f"     - {run.info.run_name} (ID: {run.info.run_id})")
+    except Exception as e:
+        print(f"❌ Could not fetch production model: {e}")
+        import traceback
+        print(traceback.format_exc())
+    
+    # Get latest training run (most recent training run, not data profile)
+    latest_metrics = None
+    try:
+        print("🔍 Fetching latest training run...")
+        experiment = mlflow.get_experiment_by_name("stock_volatility_prediction")
+        if experiment:
+            # Get all runs and filter for training runs
+            all_runs = client.search_runs(
+                experiment_ids=[experiment.experiment_id],
+                order_by=["start_time DESC"],
+                max_results=10
+            )
+            # Filter for training runs only
+            training_runs = [run for run in all_runs if run.info.run_name and run.info.run_name.startswith("training_")]
+            
+            if training_runs:
+                latest_run = training_runs[0]  # Most recent training run
+                print(f"📌 Latest training run: {latest_run.info.run_id}")
                 print(f"   Run name: {latest_run.info.run_name}")
                 print(f"   Start time: {latest_run.info.start_time}")
                 latest_metrics = {
@@ -173,12 +173,23 @@ def compare_models():
                 # Validate metrics exist
                 if not all([latest_metrics['rmse'] is not None, latest_metrics['mae'] is not None, latest_metrics['r2'] is not None]):
                     latest_metrics = None
-                    print("❌ Latest model run exists but metrics are missing")
+                    print("❌ Latest training run exists but metrics are missing")
                     print(f"   Available metrics: {list(latest_run.data.metrics.keys())}")
+                elif latest_metrics['rmse'] == 0 and latest_metrics['mae'] == 0 and latest_metrics['r2'] == 1.0:
+                    print("⚠️ Latest metrics look suspicious (perfect scores):")
+                    print(f"   RMSE={latest_metrics['rmse']:.6f}, MAE={latest_metrics['mae']:.6f}, R²={latest_metrics['r2']:.6f}")
+                    print("   This may indicate:")
+                    print("   - Data leakage in features")
+                    print("   - Test set too small or identical to training set")
+                    print("   - Evaluation issue")
+                    print("   ⚠️ Proceeding with comparison, but please investigate")
                 else:
                     print(f"✅ Latest metrics: RMSE={latest_metrics['rmse']:.6f}, MAE={latest_metrics['mae']:.6f}, R²={latest_metrics['r2']:.6f}")
             else:
-                print("⚠️ No runs found in experiment")
+                print("⚠️ No training runs found in experiment")
+                print("   Available runs:")
+                for run in all_runs[:5]:
+                    print(f"     - {run.info.run_name} (ID: {run.info.run_id})")
         else:
             print("⚠️ Experiment 'stock_volatility_prediction' not found")
     except Exception as e:
@@ -195,13 +206,15 @@ def compare_models():
         try:
             experiment = mlflow.get_experiment_by_name("stock_volatility_prediction")
             if experiment:
-                runs = client.search_runs(
+                all_runs = client.search_runs(
                     experiment_ids=[experiment.experiment_id],
                     order_by=["start_time DESC"],
-                    max_results=2
+                    max_results=10
                 )
-                if len(runs) == 1:
-                    print("⚠️ Only 1 run found in experiment")
+                training_runs = [run for run in all_runs if run.info.run_name and run.info.run_name.startswith("training_")]
+                
+                if len(training_runs) == 1:
+                    print("⚠️ Only 1 training run found in experiment")
                     print("   This means no new model has been trained since the last comparison")
                     print("   The training pipeline may not have run, or Dagshub may not have received the new run")
                     print("\n❌ **REJECT**: No new model to compare")
@@ -210,11 +223,11 @@ def compare_models():
                     print("   2. The training script logged metrics to MLflow/Dagshub")
                     print("   3. Dagshub is accessible and receiving new runs")
                     sys.exit(1)
-                elif len(runs) >= 2:
-                    latest_run_id = runs[0].info.run_id
-                    prod_run_id = runs[1].info.run_id
+                elif len(training_runs) >= 2:
+                    latest_run_id = training_runs[0].info.run_id
+                    prod_run_id = training_runs[1].info.run_id
                     if latest_run_id == prod_run_id:
-                        print("⚠️ Latest run and production run are the same")
+                        print("⚠️ Latest training run and production run are the same")
                         print("   No new model has been trained")
                         print("\n❌ **REJECT**: No new model to compare")
                         sys.exit(1)

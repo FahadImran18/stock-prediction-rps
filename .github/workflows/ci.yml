@@ -123,7 +123,8 @@ jobs:
           PR_NUMBER="${{ github.event.pull_request.number }}"
           if [ -n "$PR_NUMBER" ] && [ "$PR_NUMBER" != "null" ]; then
             echo "Posting CML report to PR #$PR_NUMBER..."
-            cml comment create model_comparison.md --pr-id "$PR_NUMBER" --token "$REPO_TOKEN" || {
+            # Use --target pr/NUMBER format (correct CML syntax)
+            cml comment create model_comparison.md --target "pr/$PR_NUMBER" --token "$REPO_TOKEN" || {
               echo "⚠️ CML comment failed - this is non-blocking"
               echo "Report is available in the workflow logs above"
             }
