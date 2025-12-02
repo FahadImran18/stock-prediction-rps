@@ -221,3 +221,4 @@ if __name__ == "__main__":
     filepath = extract_stock_data(api_key)
     print(f"Data extracted and saved to: {filepath}")
 
+# Test CI Pipeline
