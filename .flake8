@@ -33,10 +33,7 @@ max-line-length = 127
 max-complexity = 10
 
 # Ignore specific error codes
-ignore = 
-    E203,  # whitespace before ':'
-    E501,  # line too long (handled by max-line-length)
-    W503,  # line break before binary operator
+ignore = E203,E501,W503
 
 # Select specific error codes for strict checking
 select = E9,F63,F7,F82
