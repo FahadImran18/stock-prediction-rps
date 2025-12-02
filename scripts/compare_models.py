@@ -7,20 +7,63 @@ import mlflow
 import mlflow.sklearn
 from mlflow.tracking import MlflowClient
 import pandas as pd
+import time
+from urllib.parse import urlparse, urlunparse
+
+def check_dagshub_connectivity(mlflow_tracking_uri, max_retries=3, retry_delay=5):
+    """Check if Dagshub/MLflow is accessible"""
+    if 'dagshub.com' not in mlflow_tracking_uri:
+        return True  # Not Dagshub, assume accessible
+    
+    import requests
+    parsed = urlparse(mlflow_tracking_uri)
+    base_url = f"{parsed.scheme}://{parsed.netloc}"
+    
+    for attempt in range(max_retries):
+        try:
+            response = requests.get(base_url, timeout=10)
+            if response.status_code in [200, 401, 403]:  # 401/403 means server is up
+                return True
+        except requests.exceptions.RequestException as e:
+            if attempt < max_retries - 1:
+                print(f"⚠️ Dagshub connectivity check failed (attempt {attempt + 1}/{max_retries}): {e}")
+                print(f"   Retrying in {retry_delay} seconds...")
+                time.sleep(retry_delay)
+            else:
+                print(f"❌ Dagshub appears to be down or unreachable: {e}")
+                return False
+    return False
 
 def compare_models():
     """Compare new model with production model"""
     mlflow_tracking_uri = os.getenv('MLFLOW_TRACKING_URI')
     if not mlflow_tracking_uri:
-        print("MLFLOW_TRACKING_URI not set")
+        print("❌ MLFLOW_TRACKING_URI not set")
         sys.exit(1)
+    
+    print(f"📊 MLflow Tracking URI: {mlflow_tracking_uri}")
+    
+    # Check Dagshub connectivity if using Dagshub
+    if 'dagshub.com' in mlflow_tracking_uri:
+        print("🔍 Checking Dagshub connectivity...")
+        if not check_dagshub_connectivity(mlflow_tracking_uri):
+            print("\n⚠️ ==========================================")
+            print("⚠️ WARNING: Dagshub appears to be down")
+            print("⚠️ Cannot fetch model metrics for comparison")
+            print("⚠️ ==========================================")
+            print("\nOptions:")
+            print("1. Wait for Dagshub to come back online and re-run")
+            print("2. If this is urgent, you may need to manually verify model performance")
+            print("\n❌ **REJECT**: Cannot verify model performance - blocking merge")
+            print("   This ensures we don't deploy untested models")
+            sys.exit(1)
+        print("✅ Dagshub is accessible")
     
     # Handle Dagshub authentication
     dagshub_username = os.getenv('DAGSHUB_USERNAME')
     dagshub_token = os.getenv('DAGSHUB_TOKEN')
     
     if dagshub_username and dagshub_token and 'dagshub.com' in mlflow_tracking_uri:
-        from urllib.parse import urlparse, urlunparse
         parsed = urlparse(mlflow_tracking_uri)
         auth_uri = urlunparse((
             parsed.scheme,
@@ -31,10 +74,18 @@ def compare_models():
             parsed.fragment
         ))
         mlflow.set_tracking_uri(auth_uri)
+        print(f"🔐 Authenticated with Dagshub as: {dagshub_username}")
     else:
         mlflow.set_tracking_uri(mlflow_tracking_uri)
+        if 'dagshub.com' in mlflow_tracking_uri:
+            print("⚠️ DAGSHUB_USERNAME and DAGSHUB_TOKEN not set - authentication may fail")
     
-    client = MlflowClient()
+    try:
+        client = MlflowClient()
+        print("✅ MLflow client initialized")
+    except Exception as e:
+        print(f"❌ Failed to initialize MLflow client: {e}")
+        sys.exit(1)
     
     # Get production model (try registry first, fallback to latest experiment run)
     prod_metrics = None
@@ -60,16 +111,26 @@ def compare_models():
     # Fallback: Get latest run from experiment (works with Dagshub)
     if not prod_metrics:
         try:
+            print("🔍 Fetching experiment: stock_volatility_prediction")
             experiment = mlflow.get_experiment_by_name("stock_volatility_prediction")
-            if experiment:
+            if not experiment:
+                print("⚠️ Experiment 'stock_volatility_prediction' not found")
+            else:
+                print(f"✅ Found experiment: {experiment.experiment_id}")
+                print("🔍 Searching for runs...")
                 runs = client.search_runs(
                     experiment_ids=[experiment.experiment_id],
                     order_by=["start_time DESC"],
                     max_results=2  # Get last 2 runs
                 )
+                print(f"📊 Found {len(runs)} run(s) in experiment")
+                
                 if len(runs) >= 2:
                     # Use second-to-last as "production" baseline
                     prod_run = runs[1]
+                    print(f"📌 Using run {prod_run.info.run_id} as production baseline")
+                    print(f"   Run name: {prod_run.info.run_name}")
+                    print(f"   Start time: {prod_run.info.start_time}")
                     prod_metrics = {
                         'rmse': prod_run.data.metrics.get('rmse'),
                         'mae': prod_run.data.metrics.get('mae'),
@@ -77,13 +138,21 @@ def compare_models():
                     }
                     # Validate metrics exist
                     if not all([prod_metrics['rmse'] is not None, prod_metrics['mae'] is not None, prod_metrics['r2'] is not None]):
+                        print("⚠️ Production run exists but metrics are missing")
                         prod_metrics = None
+                    else:
+                        print(f"✅ Production metrics: RMSE={prod_metrics['rmse']:.6f}, MAE={prod_metrics['mae']:.6f}, R²={prod_metrics['r2']:.6f}")
+                elif len(runs) == 1:
+                    print("ℹ️ Only 1 run found - this will be the baseline for future comparisons")
         except Exception as e:
-            print(f"⚠️ Could not fetch production model: {e}")
+            print(f"❌ Could not fetch production model: {e}")
+            import traceback
+            print(traceback.format_exc())
     
     # Get latest model (most recent run)
     latest_metrics = None
     try:
+        print("🔍 Fetching latest model run...")
         experiment = mlflow.get_experiment_by_name("stock_volatility_prediction")
         if experiment:
             runs = client.search_runs(
@@ -93,6 +162,9 @@ def compare_models():
             )
             if runs:
                 latest_run = runs[0]
+                print(f"📌 Latest run: {latest_run.info.run_id}")
+                print(f"   Run name: {latest_run.info.run_name}")
+                print(f"   Start time: {latest_run.info.start_time}")
                 latest_metrics = {
                     'rmse': latest_run.data.metrics.get('rmse'),
                     'mae': latest_run.data.metrics.get('mae'),
@@ -101,12 +173,54 @@ def compare_models():
                 # Validate metrics exist
                 if not all([latest_metrics['rmse'] is not None, latest_metrics['mae'] is not None, latest_metrics['r2'] is not None]):
                     latest_metrics = None
-                    print("⚠️ Latest model run exists but metrics are missing")
+                    print("❌ Latest model run exists but metrics are missing")
+                    print(f"   Available metrics: {list(latest_run.data.metrics.keys())}")
+                else:
+                    print(f"✅ Latest metrics: RMSE={latest_metrics['rmse']:.6f}, MAE={latest_metrics['mae']:.6f}, R²={latest_metrics['r2']:.6f}")
+            else:
+                print("⚠️ No runs found in experiment")
+        else:
+            print("⚠️ Experiment 'stock_volatility_prediction' not found")
     except Exception as e:
-        print(f"⚠️ Could not fetch latest model: {e}")
+        print(f"❌ Could not fetch latest model: {e}")
+        import traceback
+        print(traceback.format_exc())
     
     # Generate comparison report
-    print("# Model Comparison Report\n")
+    print("\n# Model Comparison Report\n")
+    
+    # Check if we're comparing the same run (no new runs added)
+    if prod_metrics and latest_metrics:
+        # Get run IDs to check if they're the same
+        try:
+            experiment = mlflow.get_experiment_by_name("stock_volatility_prediction")
+            if experiment:
+                runs = client.search_runs(
+                    experiment_ids=[experiment.experiment_id],
+                    order_by=["start_time DESC"],
+                    max_results=2
+                )
+                if len(runs) == 1:
+                    print("⚠️ Only 1 run found in experiment")
+                    print("   This means no new model has been trained since the last comparison")
+                    print("   The training pipeline may not have run, or Dagshub may not have received the new run")
+                    print("\n❌ **REJECT**: No new model to compare")
+                    print("   Please ensure:")
+                    print("   1. The Airflow DAG completed successfully")
+                    print("   2. The training script logged metrics to MLflow/Dagshub")
+                    print("   3. Dagshub is accessible and receiving new runs")
+                    sys.exit(1)
+                elif len(runs) >= 2:
+                    latest_run_id = runs[0].info.run_id
+                    prod_run_id = runs[1].info.run_id
+                    if latest_run_id == prod_run_id:
+                        print("⚠️ Latest run and production run are the same")
+                        print("   No new model has been trained")
+                        print("\n❌ **REJECT**: No new model to compare")
+                        sys.exit(1)
+        except Exception as e:
+            print(f"⚠️ Could not verify run uniqueness: {e}")
+            # Continue with comparison anyway
     
     if prod_metrics and latest_metrics:
         print("## Metrics Comparison\n")
