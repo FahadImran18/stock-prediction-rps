@@ -1,175 +1,92 @@
-# Real-Time Predictive System (RPS) - Stock Volatility Prediction
+# Real-Time Predictive System (RPS)
 
-A complete MLOps pipeline for real-time stock volatility prediction using automated data ingestion, model training, CI/CD, and monitoring.
+Stock volatility prediction with a full MLOps pipeline — data ingestion, model training, CI/CD, and live monitoring.
 
-## 🎯 Project Overview
+## What this does
 
-This system predicts short-term stock volatility (next hour) using a fully automated MLOps pipeline that includes:
+RPS predicts short-term stock volatility (next-hour) by pulling live market data, running it through a feature engineering pipeline, and serving predictions via a REST API. The whole thing is automated: new data comes in every 6 hours, models get retrained and compared against the current champion, and metrics are visible in Grafana.
 
-- **Data Pipeline**: Automated extraction, quality checks, transformation, and versioning
-- **Model Training**: MLflow experiment tracking with Dagshub integration
-- **Orchestration**: Apache Airflow DAG running every 6 hours
-- **CI/CD**: GitHub Actions with automated testing and model comparison (CML)
-- **API Service**: FastAPI REST API with Prometheus metrics
-- **Monitoring**: Grafana dashboards for real-time metrics and alerts
+## Architecture
+stockdata API  →  Airflow DAG  →  MinIO/S3
+|
+MLflow (Dagshub)
+|
+FastAPI  →  Prometheus  →  Grafana
 
-## 🏗️ Architecture
-
-```
-┌─────────────┐     ┌──────────────┐     ┌─────────────┐
-│ stockdata   │────▶│   Airflow    │────▶│   MinIO/S3  │
-│    API      │     │     DAG      │     │   Storage   │
-└─────────────┘     └──────────────┘     └─────────────┘
-                            │
-                            ▼
-                    ┌──────────────┐
-                    │   MLflow     │
-                    │  (Dagshub)  │
-                    └──────────────┘
-                            │
-                            ▼
-                    ┌──────────────┐     ┌─────────────┐
-                    │  FastAPI     │────▶│ Prometheus  │
-                    │   Service    │     │   Metrics   │
-                    └──────────────┘     └─────────────┘
-                            │
-                            ▼
-                    ┌──────────────┐
-                    │   Grafana    │
-                    │  Dashboard   │
-                    └──────────────┘
-```
-
-## 📁 Project Structure
-
-```
+## Project layout
 .
-├── airflow/dags/          # Airflow DAG definitions
+├── airflow/dags/      # DAG definitions
 ├── src/
-│   ├── data/             # ETL pipeline (extract, transform, load)
-│   ├── training/         # Model training script
-│   ├── api/              # FastAPI service
-│   └── monitoring/       # Prometheus metrics
-├── docker/               # Docker configurations
-├── .github/workflows/    # CI/CD pipelines
-├── config/               # Configuration files
-└── scripts/              # Utility scripts
+│   ├── data/          # Extract, transform, load
+│   ├── training/      # Model training
+│   ├── api/           # FastAPI service
+│   └── monitoring/    # Prometheus metrics
+├── docker/
+├── .github/workflows/
+├── config/
+└── scripts/
+
+## Getting started
+
+You'll need Python 3.12+, Docker, and accounts on Dagshub and stockdata.org.
+
+```bash
+git clone <repo-url>
+cd Project
+python3 -m venv venv && source venv/bin/activate
+pip install -r requirements.txt
+
+cp .env.example .env
+# Fill in your API keys
+
+export AIRFLOW_HOME=$(pwd)/airflow
+airflow db init
+airflow users create --username admin --password admin --role Admin --email admin@example.com
+
+cd docker && docker-compose up -d
+
+# In separate terminals:
+airflow webserver --port 8080
+airflow scheduler
 ```
 
-## 🚀 Quick Start
+Services run at:
 
-### Prerequisites
-- Python 3.12+
-- Docker & Docker Compose
-- Git
-- Dagshub account
-- Stockdata.org API key
+- Airflow: http://localhost:8080 (admin/admin)
+- API docs: http://localhost:8000/docs
+- Grafana: http://localhost:3000 (admin/admin)
+- Prometheus: http://localhost:9090
 
-### Setup Steps
+## How the pipeline works
 
-1. **Clone and setup environment:**
-   ```bash
-   git clone <repo-url>
-   cd Project
-   python3 -m venv venv
-   source venv/bin/activate
-   pip install -r requirements.txt
-   ```
+**Data** — Fetches OHLCV data from stockdata.org, validates schema and row counts, engineers lag features and rolling volatility windows, then versions everything with DVC.
 
-2. **Configure environment:**
-   ```bash
-   cp .env.example .env
-   # Edit .env with your API keys and credentials
-   ```
+**Training** — Trains a Gradient Boosting Regressor and logs RMSE, MAE, R², and MAPE to MLflow via Dagshub. Model artifacts and feature columns are stored as MLflow artifacts.
 
-3. **Initialize Airflow:**
-   ```bash
-   export AIRFLOW_HOME=$(pwd)/airflow
-   airflow db init
-   airflow users create --username admin --password admin --role Admin --email admin@example.com
-   ```
+**CI/CD** — Three-stage GitHub Actions pipeline: feature branches run linting and unit tests; merges to `dev` retrain the model and generate a CML comparison report against the current production model; merges to `master` build and verify the Docker image.
 
-4. **Start services:**
-   ```bash
-   cd docker
-   docker-compose up -d
-   ```
+**Monitoring** — Prometheus scrapes API latency, request volume, inference time, and data drift metrics. Grafana dashboards surface these with configurable alert thresholds.
 
-5. **Start Airflow:**
-   ```bash
-   airflow webserver --port 8080  # Terminal 1
-   airflow scheduler               # Terminal 2
-   ```
+## API
+GET  /health    Health check
+POST /predict   Predict next-hour volatility for a given ticker
+GET  /metrics   Prometheus metrics endpoint
 
-6. **Access services:**
-   - Airflow UI: http://localhost:8080 (admin/admin)
-   - API Docs: http://localhost:8000/docs
-   - Grafana: http://localhost:3000 (admin/admin)
-   - Prometheus: http://localhost:9090
-
-## 📚 Documentation
-
-- **[TEAM_SETUP.md](TEAM_SETUP.md)** - Complete setup guide for team members
-- **[CI_CD_SETUP.md](CI_CD_SETUP.md)** - GitHub Actions CI/CD configuration
-- **[GRAFANA_SETUP.md](GRAFANA_SETUP.md)** - Grafana dashboard and alerting setup
-- **[SETUP.md](SETUP.md)** - Detailed technical setup (advanced)
-
-## 🔧 Key Features
-
-### Data Pipeline
-- **Extraction**: Fetches stock data from stockdata.org API
-- **Quality Checks**: Validates data quality (nulls, schema, min rows)
-- **Transformation**: Feature engineering (lag features, rolling means, volatility)
-- **Versioning**: DVC for data version control
-- **Storage**: Optional MinIO/S3 storage
-
-### Model Management
-- **Training**: Gradient Boosting Regressor with hyperparameter tracking
-- **Tracking**: MLflow experiment tracking via Dagshub
-- **Metrics**: RMSE, MAE, R², MAPE logged to MLflow
-- **Artifacts**: Models and feature columns stored in MLflow
-
-### CI/CD Pipeline
-- **Feature → dev**: Code quality checks and unit tests
-- **dev → test**: Model retraining with CML comparison reports
-- **test → master**: Docker image build and deployment verification
-
-### Monitoring
-- **Metrics**: API latency, request count, inference time, data drift
-- **Dashboards**: Real-time Grafana visualizations
-- **Alerts**: Configurable alerts for latency and drift thresholds
-
-## 🛠️ Technology Stack
-
-| Category | Tools |
-|----------|-------|
-| **Orchestration** | Apache Airflow |
-| **Data/Model Mgmt** | DVC, MLflow, Dagshub |
-| **CI/CD** | GitHub Actions, CML |
-| **API** | FastAPI |
-| **Monitoring** | Prometheus, Grafana |
-| **Storage** | MinIO (S3-compatible) |
-| **Containerization** | Docker, Docker Compose |
-
-## 📊 API Endpoints
-
-- `GET /health` - Health check
-- `POST /predict` - Predict stock volatility
-- `GET /metrics` - Prometheus metrics
-
-## 🔐 Required Credentials
+## Required credentials
 
 Set these in `.env` or as Airflow Variables:
 
-- `STOCKDATA_API_KEY` - Stockdata.org API key
-- `MLFLOW_TRACKING_URI` - Dagshub MLflow URI
-- `DAGSHUB_USERNAME` - Dagshub username
-- `DAGSHUB_TOKEN` - Dagshub access token
+| Variable | Description |
+|---|---|
+| `STOCKDATA_API_KEY` | stockdata.org API key |
+| `MLFLOW_TRACKING_URI` | Dagshub MLflow tracking URI |
+| `DAGSHUB_USERNAME` | Dagshub username |
+| `DAGSHUB_TOKEN` | Dagshub access token |
 
-## 📝 License
+## Stack
 
-MIT License
+Airflow, MLflow, DVC, Dagshub, FastAPI, Prometheus, Grafana, MinIO, Docker, GitHub Actions, CML.
 
-## 🤝 Contributing
+## License
 
-See [TEAM_SETUP.md](TEAM_SETUP.md) for development setup instructions.
+MIT
